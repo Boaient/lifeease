@@ -1,0 +1,8 @@
+# Company (Boaient)
+Host github-boaient
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/id_ed25519_boaient
+  AddKeysToAgent yes
+  UseKeychain yes
+

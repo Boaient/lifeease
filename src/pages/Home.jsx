@@ -9,21 +9,40 @@ export default function Home() {
   // messages: { id, type:'user'|'bot', text?, files?: Array<{name,size,ext}> }
   const [messages, setMessages] = useState([]);
   const [pendingFiles, setPendingFiles] = useState([]); // File[]
-  const inactivity = useRef(null);
   const chatFileRef = useRef(null);
 
+  // reflect active state on <body>
   useEffect(() => {
     document.body.classList.toggle("active", active);
     return () => document.body.classList.remove("active");
   }, [active]);
 
-  function bumpActive() {
+  // Close expanded chat on Escape (does end conversation)
+  useEffect(() => {
+    function onKey(e) {
+      if (e.key === "Escape" && chatOpen) {
+        closeFloatingChat(); // ends conversation + rotates session id
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [chatOpen]);
+
+  // ---- NEW: simple activator (no inactivity timer anymore) ----
+  function goActive() {
     setActive(true);
-    if (inactivity.current) clearTimeout(inactivity.current);
-    inactivity.current = setTimeout(() => {
-      setActive(false);
-      setMicOn(false);
-    }, 60000);
+  }
+
+  // ---- NEW: exit active screen cross (go back to idle without ending convo) ----
+  function exitActiveScreen() {
+    // Only hide the expanded chat UI if it’s open; do NOT end conversation.
+    if (chatOpen) {
+      setChatOpen(false);
+      document.getElementById("active-floating-chat-panel")?.classList.remove("open");
+      // Keep messages so user can reopen later
+    }
+    setMicOn(false);
+    setActive(false); // back to idle screen
   }
 
   function openSettings() {
@@ -36,16 +55,31 @@ export default function Home() {
 
   function openFloatingChat() {
     setChatOpen(true);
+    setActive(true); // ensure we're on active screen when chat opens
     document.getElementById("active-floating-chat-panel")?.classList.add("open");
   }
-  function closeFloatingChat() {
+
+  // IMPORTANT: expanded chat own close — ends the conversation + clears session/history
+  async function closeFloatingChat() {
+    try {
+      await api.endConversation(); // resets server history + rotates session id
+    } catch (e) {
+      console.warn("[chat] endConversation failed (continuing):", e);
+    }
+
+    // Clear local UI state for a fresh convo next time
+    setMessages([]);
+    setPendingFiles([]);
+    if (chatFileRef.current) chatFileRef.current.value = "";
+
     setChatOpen(false);
     document.getElementById("active-floating-chat-panel")?.classList.remove("open");
   }
 
   function triggerUploadFromIdle() {
-    bumpActive();
+    // switch to active and show the panel so user sees attachments being added
     if (!chatOpen) openFloatingChat();
+    else goActive();
   }
 
   // ----------------- Utils -----------------
@@ -66,7 +100,7 @@ export default function Home() {
   function handleFiles(fileList) {
     if (!fileList || fileList.length === 0) return;
     if (!chatOpen) openFloatingChat();
-    bumpActive();
+    else goActive();
 
     const picked = Array.from(fileList); // File[]
     setPendingFiles((prev) => [...prev, ...picked]);
@@ -90,7 +124,7 @@ export default function Home() {
     if (!text && !hasFiles) return;
 
     if (!chatOpen) openFloatingChat();
-    bumpActive();
+    else goActive();
 
     // capture & clear pending files
     const filesForThisMessage = pendingFiles.slice();
@@ -104,7 +138,7 @@ export default function Home() {
       {
         id: userMsgId,
         type: "user",
-        text,                 // can be empty (files-only)
+        text, // can be empty (files-only)
         files: hasFiles ? filesMeta : undefined,
       },
     ]);
@@ -118,35 +152,30 @@ export default function Home() {
 
     try {
       // IMPORTANT: pass an object; api.js builds FormData when files are present
-      const res = await api.analyzeSmart({ text, files: filesForThisMessage });
+      const res = await api.sendChatAndLog({ text, files: filesForThisMessage });
 
       let botReply = res?.model_output || "";
       if (typeof botReply === "string" && botReply.includes("assistant")) {
         botReply = botReply.split("assistant").pop().trim();
       }
 
-      const ack =
-        hasFiles
-          ? `✓ Uploaded ${filesForThisMessage.length} file${filesForThisMessage.length > 1 ? "s" : ""} (${filesMeta
-              .map((m) => formatBytes(m.size))
-              .join(" + ")})`
-          : "✓";
+      const ack = hasFiles
+        ? `✓ Uploaded ${filesForThisMessage.length} file${filesForThisMessage.length > 1 ? "s" : ""} (${filesMeta
+            .map((m) => formatBytes(m.size))
+            .join(" + ")})`
+        : "✓";
 
       // replace the sending placeholder with the final reply (+ upload ack)
       setMessages((prev) =>
         prev.map((m) =>
-          m.id === sendingId
-            ? { ...m, text: botReply ? `${ack}\n\n${botReply}` : ack }
-            : m
+          m.id === sendingId ? { ...m, text: botReply ? `${ack}\n\n${botReply}` : ack } : m
         )
       );
     } catch (e) {
       console.error(e);
       setMessages((prev) =>
         prev.map((m) =>
-          m.id === sendingId
-            ? { ...m, text: "⚠️ Error reaching server. Please try again." }
-            : m
+          m.id === sendingId ? { ...m, text: "⚠️ Error reaching server. Please try again." } : m
         )
       );
     }
@@ -158,7 +187,8 @@ export default function Home() {
       className={`active-floating-chat-panel ${chatOpen ? "open" : ""}`}
       id="active-floating-chat-panel"
     >
-      <button className="chat-close-btn" onClick={closeFloatingChat}>
+      {/* Expanded chat CLOSE: ends conversation + resets session */}
+      <button className="chat-close-btn" onClick={closeFloatingChat} title="End & close chat">
         ×
       </button>
 
@@ -276,7 +306,7 @@ export default function Home() {
               e.currentTarget.value = "";
             }
           }}
-          onInput={bumpActive}
+          onInput={goActive}
         />
         <button
           className="send-btn"
@@ -301,6 +331,18 @@ export default function Home() {
         <img src="/assets/emergency.png" className="icon-button" alt="Emergency" />
       </div>
 
+      {/* NEW: Exit Active Screen cross (only visible when active) */}
+      {active && (
+        <button
+          className="active-exit-btn"
+          aria-label="Back to idle home"
+          title="Back to idle home"
+          onClick={exitActiveScreen}
+        >
+          ×
+        </button>
+      )}
+
       <div
         id="idle-background"
         className="idle-bg"
@@ -315,7 +357,7 @@ export default function Home() {
         className="active-mic-button"
         onClick={() => {
           setMicOn(!micOn);
-          bumpActive();
+          goActive();
         }}
       >
         <img src={micOn ? "/assets/mic-on.jpg" : "/assets/mic-off.jpg"} alt="Mic" />
@@ -329,7 +371,7 @@ export default function Home() {
               type="text"
               className="text-input"
               placeholder="Type your message..."
-              onInput={bumpActive}
+              onInput={goActive}
             />
           </div>
         </div>
@@ -338,7 +380,6 @@ export default function Home() {
           <div
             className="active-floating-chat-trigger"
             onClick={() => {
-              bumpActive();
               openFloatingChat();
             }}
           >
@@ -347,7 +388,7 @@ export default function Home() {
         )}
       </div>
 
-      {/* Idle chatbar (unchanged) */}
+      {/* Idle chatbar */}
       <div className="idle-chatbar">
         <button
           type="button"
@@ -362,9 +403,9 @@ export default function Home() {
           type="text"
           className="idle-text-input"
           placeholder="Type your message..."
-          onFocus={bumpActive}
+          onFocus={goActive}
         />
-        <div className="idle-mic" onClick={bumpActive}>
+        <div className="idle-mic" onClick={goActive}>
           <img src="/assets/mic-off.jpg" alt="Mic" />
         </div>
       </div>
